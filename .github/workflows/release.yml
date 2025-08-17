@@ -33,13 +33,14 @@ jobs:
         - name: Build binary
           run: |
               mkdir -p dist
+              BIN_NAME=iptables-parser-${{ matrix.goos }}-${{ matrix.goarch }}
               GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-                go build -o dist/iptables-parser-${{ matrix.goos }}-${{ matrix.goarch }}
+                go build -o dist/$BIN_NAME
 
-        - name: Upload binaries as artifact
+        - name: Upload binary artifact
           uses: actions/upload-artifact@v4
           with:
-              name: binaries
+              name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
               path: dist/*
 
     release:
@@ -47,15 +48,29 @@ jobs:
         needs: build
         runs-on: ubuntu-latest
         steps:
-        - name: Download artifacts
+        - name: Download all artifacts
           uses: actions/download-artifact@v4
           with:
-              name: binaries
               path: dist
+
+        - name: Flatten artifact directories
+          run: |
+              mkdir -p release
+              find dist -type f -exec mv {} release/ \;
+              ls -lh release
+
+        - name: Rename binaries with tag
+          run: |
+              TAG="${GITHUB_REF_NAME}"   # e.g. v1.0.0
+              for f in release/*; do
+                base=$(basename $f)
+                mv "$f" "release/${base}-${TAG}"
+              done
+              ls -lh release
 
         - name: Create Release
           uses: softprops/action-gh-release@v2
           with:
-              files: dist/*
+              files: release/*
           env:
               GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
