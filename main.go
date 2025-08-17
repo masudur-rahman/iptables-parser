@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,28 @@ type Chain struct {
 type Rule struct {
 	ChainName string
 	Rule      string // The full rule string (e.g., "-A DOCKER-USER -j RETURN")
+}
+
+// stringSliceValue is a custom type that implements the flag.Value interface.
+type stringSliceValue []string
+
+func (s *stringSliceValue) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceValue) Set(value string) error {
+	*s = strings.Split(value, ",")
+	return nil
+}
+
+// hasString checks if a string exists in a slice.
+func hasString(slice []string, s string) bool {
+	for _, val := range slice {
+		if val == s {
+			return true
+		}
+	}
+	return false
 }
 
 // readAndParse reads iptables-save output from an io.Reader and returns a map of tables.
@@ -65,7 +88,6 @@ func readAndParse(r io.Reader) (map[string]*Table, error) {
 			currentTable = nil
 
 		case strings.HasPrefix(line, "#"):
-			// Ignore all comment lines
 			continue
 		}
 	}
@@ -73,53 +95,6 @@ func readAndParse(r io.Reader) (map[string]*Table, error) {
 		return nil, fmt.Errorf("error reading input: %w", err)
 	}
 	return tables, nil
-}
-
-// filterTables filters out rules and chains based on exclusion patterns, including FORWARD.
-func filterTables(tables map[string]*Table, excludePatterns []string) map[string]*Table {
-	filteredTables := make(map[string]*Table)
-
-	for _, table := range tables {
-		filteredTable := &Table{
-			Name: table.Name,
-		}
-
-		for _, chain := range table.Chains {
-			isExcluded := false
-			for _, pattern := range excludePatterns {
-				if strings.HasPrefix(chain.Name, pattern) {
-					isExcluded = true
-					break
-				}
-			}
-			if chain.Name == "FORWARD" {
-				isExcluded = true
-			}
-			if !isExcluded {
-				filteredTable.Chains = append(filteredTable.Chains, chain)
-			}
-		}
-
-		for _, rule := range table.Rules {
-			isExcluded := false
-			for _, pattern := range excludePatterns {
-				if strings.HasPrefix(rule.ChainName, pattern) || strings.Contains(rule.Rule, pattern) {
-					isExcluded = true
-					break
-				}
-			}
-			if rule.ChainName == "FORWARD" {
-				isExcluded = true
-			}
-			if !isExcluded {
-				filteredTable.Rules = append(filteredTable.Rules, rule)
-			}
-		}
-
-		filteredTables[filteredTable.Name] = filteredTable
-	}
-
-	return filteredTables
 }
 
 // printRules writes the filtered tables in iptables-restore format to an io.Writer.
@@ -141,36 +116,76 @@ func printRules(w io.Writer, tables map[string]*Table) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatal("Usage: go run main.go <input_file> [<output_file>]")
+	inputFilePath := flag.String("input", "", "Path to the input iptables-save file")
+	outputFilePath := flag.String("output", "", "Path to the output file (defaults to stdout)")
+	var chainsToProcess stringSliceValue
+	flag.Var(&chainsToProcess, "chains", "Comma-separated list of chains to process (e.g., INPUT,OUTPUT). Defaults to all chains.")
+	var tablesToProcess stringSliceValue
+	flag.Var(&tablesToProcess, "tables", "Comma-separated list of tables to process (e.g., filter,nat). Defaults to all tables.")
+	flag.Parse()
+
+	if *inputFilePath == "" {
+		log.Fatal("Error: --input flag is required")
 	}
 
-	inputFilePath := os.Args[1]
-	inputFile, err := os.Open(inputFilePath)
+	inputFile, err := os.Open(*inputFilePath)
 	if err != nil {
-		log.Fatalf("failed to open input file '%s': %v", inputFilePath, err)
+		log.Fatalf("failed to open input file '%s': %v", *inputFilePath, err)
 	}
 	defer inputFile.Close()
 
-	tables, err := readAndParse(inputFile)
+	allTables, err := readAndParse(inputFile)
 	if err != nil {
 		log.Fatalf("failed to parse iptables data: %v", err)
 	}
 
-	excludePatterns := []string{"DOCKER", "KUBE"}
-	filteredTables := filterTables(tables, excludePatterns)
-
 	finalTables := make(map[string]*Table)
-	if filterTable, ok := filteredTables["filter"]; ok {
-		finalTables["filter"] = filterTable
+	var requestedTables []string
+
+	// If no tables are specified, get all of them.
+	if len(tablesToProcess) > 0 {
+		requestedTables = tablesToProcess
+	} else {
+		for tableName := range allTables {
+			requestedTables = append(requestedTables, tableName)
+		}
+	}
+
+	for _, tableName := range requestedTables {
+		if sourceTable, ok := allTables[tableName]; ok {
+			finalTable := &Table{Name: sourceTable.Name}
+
+			// If no chains are specified, get all of them.
+			var requestedChains []string
+			if len(chainsToProcess) > 0 {
+				requestedChains = chainsToProcess
+			} else {
+				for _, chain := range sourceTable.Chains {
+					requestedChains = append(requestedChains, chain.Name)
+				}
+			}
+
+			for _, chain := range sourceTable.Chains {
+				if hasString(requestedChains, chain.Name) {
+					finalTable.Chains = append(finalTable.Chains, chain)
+				}
+			}
+
+			for _, rule := range sourceTable.Rules {
+				if hasString(requestedChains, rule.ChainName) {
+					finalTable.Rules = append(finalTable.Rules, rule)
+				}
+			}
+
+			finalTables[finalTable.Name] = finalTable
+		}
 	}
 
 	var output io.Writer
-	if len(os.Args) > 2 {
-		outputFilePath := os.Args[2]
-		outputFile, err := os.Create(outputFilePath)
+	if *outputFilePath != "" {
+		outputFile, err := os.Create(*outputFilePath)
 		if err != nil {
-			log.Fatalf("failed to create output file '%s': %v", outputFilePath, err)
+			log.Fatalf("failed to create output file '%s': %v", *outputFilePath, err)
 		}
 		defer outputFile.Close()
 		output = outputFile
