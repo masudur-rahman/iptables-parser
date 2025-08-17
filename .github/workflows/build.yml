@@ -1,0 +1,30 @@
+name: Build and Test (CI)
+
+on:
+    push:
+        branches:
+        - "**"   # run on all branches
+    pull_request:
+
+jobs:
+    build:
+        name: Build and Test
+        runs-on: ubuntu-latest
+        steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+
+        - name: Set up Go
+          uses: actions/setup-go@v5
+          with:
+              go-version: "1.23"
+
+        - name: Run tests
+          run: go test ./...
+
+        - name: Build binaries (linux/amd64, linux/arm64, darwin/arm64)
+          run: |
+              mkdir -p dist
+              GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/iptables-parser-linux-amd64
+              GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o dist/iptables-parser-linux-arm64
+              GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o dist/iptables-parser-darwin-arm64
